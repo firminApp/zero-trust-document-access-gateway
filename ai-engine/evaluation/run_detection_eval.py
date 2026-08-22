@@ -18,8 +18,8 @@ from pathlib import Path
 from app.classification import sensitivity
 from app.detection import merge, ner, rules
 from app.models import Entite
-from evaluation.metrics import Empan, evaluer
-from evaluation.report import ecrire_rapport_detection
+from evaluation.metrics import Empan, evaluer, matrice_confusion
+from evaluation.report import ecrire_rapport_confusion, ecrire_rapport_detection
 
 CONFIGURATIONS = ("regles", "ner", "fusion", "presidio")
 
@@ -88,6 +88,18 @@ def executer(
 
     print(f"\n{'=' * 70}\nConfiguration : {configuration}  ({len(documents)} documents)\n{'=' * 70}")
     ecrire_rapport_detection(strict, partiel, sortie, intitule=f"detection_{configuration}")
+
+    # Les matrices utilisent l'appariement par POSITION, agnostique au type :
+    # c'est la seule façon de distinguer « donnée manquée » de « donnée trouvée
+    # mais mal étiquetée ». En correspondance stricte, une entité au bon endroit
+    # avec de mauvaises frontières serait comptée comme manquée et la confusion
+    # de type resterait invisible.
+    ecrire_rapport_confusion(
+        matrice_confusion(references, predictions, par_niveau=False),
+        matrice_confusion(references, predictions, par_niveau=True),
+        sortie,
+        intitule=f"confusion_{configuration}",
+    )
 
 
 def principal() -> None:

@@ -68,7 +68,9 @@ def principal() -> None:
     analyseur = argparse.ArgumentParser(description="Évaluation de l'OCR")
     analyseur.add_argument("--index", type=Path, default=Path("corpus/data/scans/index.jsonl"))
     analyseur.add_argument("--sortie", type=Path, default=Path("evaluation/resultats"))
-    analyseur.add_argument("--limite", type=int, default=20, help="documents par condition")
+    analyseur.add_argument(
+        "--limite", type=int, default=0, help="documents par condition (0 = tous)"
+    )
     arguments = analyseur.parse_args()
 
     executer(arguments.index, arguments.sortie, arguments.limite)

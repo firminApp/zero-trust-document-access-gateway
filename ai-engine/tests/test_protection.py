@@ -103,10 +103,16 @@ def test_aes_gcm_aller_retour(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_aes_gcm_detecte_l_alteration(monkeypatch: pytest.MonkeyPatch) -> None:
+    from cryptography.exceptions import InvalidTag
+
     monkeypatch.setenv("AES_KEY", CLE_TEST)
     cryptogramme = bytearray(crypt.chiffrer(b"donnee sensible"))
     cryptogramme[-1] ^= 0x01
-    with pytest.raises(Exception):
+
+    # `InvalidTag` et non `Exception` : c'est l'authentification GCM qui doit
+    # rejeter le cryptogramme. Une exception quelconque — clé absente, format
+    # invalide — validerait le test sans rien prouver.
+    with pytest.raises(InvalidTag):
         crypt.dechiffrer(bytes(cryptogramme))
 
 
@@ -150,9 +156,7 @@ def test_texte_les_valeurs_disparaissent(csv_simple: bytes) -> None:
 
 def test_texte_substitution_par_offsets_ne_decale_rien() -> None:
     """Plusieurs entités sur une même ligne : aucune ne doit être décalée."""
-    contenu = (
-        "a@exemple.sn puis b@exemple.sn puis c@exemple.sn"
-    ).encode()
+    contenu = b"a@exemple.sn puis b@exemple.sn puis c@exemple.sn"
     protege, nombre = proteger(contenu, "text/plain", "t.txt")
     sortie = protege.decode()
 

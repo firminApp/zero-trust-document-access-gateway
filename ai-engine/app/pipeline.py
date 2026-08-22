@@ -15,7 +15,7 @@ from app.classification import sensitivity
 from app.detection import merge, ner, rules
 from app.extraction import router
 from app.extraction.resultat import ResultatExtraction
-from app.models import Entite, NiveauSens
+from app.models import Entite, MethodeExtraction, NiveauSens
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +29,14 @@ def analyser(
     extraction = router.extraire(contenu, type_mime, nom)
     texte = extraction.texte
 
+    # Les règles ont besoin de savoir si le texte vient de l'OCR : elles y
+    # tolèrent les jetons disloqués et les sommes de contrôle en échec, ce
+    # qu'elles n'ont aucune raison de faire sur du texte propre.
+    issu_ocr = extraction.methode == MethodeExtraction.ocr
+
     entites: list[Entite] = []
     if texte.strip():
-        entites.extend(rules.detecter(texte))
+        entites.extend(rules.detecter(texte, ocr=issu_ocr))
         entites.extend(ner.detecter(texte))
         entites = merge.fusionner(entites)
         entites = sensitivity.classer(entites)

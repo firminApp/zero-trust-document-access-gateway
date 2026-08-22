@@ -11,7 +11,7 @@ PY := $(VENV)/bin/python
 
 .DEFAULT_GOAL := aide
 .PHONY: aide up down logs seed corpus test test-ia test-portail test-securite \
-        eval eval-ocr lint format install scan verifier-audit reset
+        eval eval-ocr eval-e2e lint format install scan verifier-audit reset
 
 aide:
 	@echo "Zero-Trust Document Access Gateway"
@@ -23,7 +23,9 @@ aide:
 	@echo "  make corpus      génère le corpus synthétique et les scans dégradés"
 	@echo "  make scan        déclenche un scan manuel de toutes les sources"
 	@echo "  make test        pytest + jest + tests de sécurité T-01..T-05"
-	@echo "  make eval        campagne d'évaluation -> CSV + tableaux Markdown"
+	@echo "  make eval        campagne d'évaluation détection -> CSV + Markdown"
+	@echo "  make eval-ocr    CER par condition de dégradation"
+	@echo "  make eval-e2e    rappel de bout en bout par condition (OCR + détection)"
 	@echo "  make lint        ruff + eslint + tsc"
 	@echo "  make reset       arrête tout et supprime les volumes (destructif)"
 
@@ -92,6 +94,15 @@ eval: install
 	  --configurations regles,ner,fusion \
 	  --sortie evaluation/resultats
 
+# Bout en bout : compose OCR et détection sur les scans dégradés. C'est la
+# mesure qui décide, puisque c'est elle qui dit ce que le système protège
+# réellement sur un document scanné.
+eval-e2e: install
+	cd ai-engine && PYTHONPATH=. .venv/bin/python -m evaluation.run_e2e_eval \
+	  --index ../corpus/data/scans/index.jsonl \
+	  --annotations ../corpus/data/annotations.jsonl \
+	  --sortie evaluation/resultats
+
 eval-ocr: install
 	cd ai-engine && PYTHONPATH=. .venv/bin/python -m evaluation.run_ocr_eval \
 	  --index ../corpus/data/scans/index.jsonl \
@@ -100,12 +111,12 @@ eval-ocr: install
 # --- Qualité -----------------------------------------------------------------
 
 lint: install
-	cd ai-engine && .venv/bin/ruff check app evaluation ../corpus
+	cd ai-engine && .venv/bin/ruff check app evaluation tests ../corpus
 	cd gateway && npm run lint
 	cd dashboard && npm run lint
 
 format: install
-	cd ai-engine && .venv/bin/black app evaluation ../corpus && .venv/bin/ruff check --fix app evaluation
+	cd ai-engine && .venv/bin/black app evaluation tests ../corpus && .venv/bin/ruff check --fix app evaluation tests
 	cd gateway && npm run format
 
 # --- Dépendances locales -----------------------------------------------------

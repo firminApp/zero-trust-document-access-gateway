@@ -199,6 +199,11 @@ parcourt sans jamais tenir l'inventaire en mémoire.
 | TXT / CSV | lecture directe | encodage deviné (latin-1 fréquent) |
 | JPEG / PNG | Tesseract `fra` | prétraitement obligatoire |
 
+Hors conteneur, le pack `fra` peut manquer : le moteur le signale bruyamment et
+se replie sur `eng` plutôt que de renvoyer une erreur. Pour l'installer sur la
+machine de développement, déposer `fra.traineddata` dans le répertoire
+`tessdata` de Tesseract (`brew --prefix`/share/tessdata sur macOS).
+
 Prétraitement OCR, dans cet ordre : niveaux de gris → binarisation adaptative
 (fenêtre 31) → redressement par angle dominant (Hough) → filtre médian. Il pèse
 davantage sur le résultat que le choix du moteur.
@@ -227,6 +232,26 @@ comparaison, jamais requis au runtime.
 validée > empan le plus large > score le plus élevé > **on conserve**. La
 dernière règle traduit la priorité au rappel : quand le système ne sait pas
 trancher, il protège davantage.
+
+**Tolérance au texte océrisé** — `rules.detecter(texte, ocr=True)` active trois
+comportements que le texte propre n'a aucune raison de subir :
+
+1. les jetons disloqués par l'OCR sont réparés dans une variante du texte, avec
+   report exact des offsets
+   ([`reparation_ocr.py`](ai-engine/app/detection/reparation_ocr.py)) ;
+2. les candidats dont une **somme de contrôle** échoue (mod-97, Luhn) sont
+   conservés, non validés, plutôt qu'écartés — une somme de contrôle est
+   détruite par un seul caractère mal lu, alors que le motif reconnaît toujours
+   la donnée. Un contrôle de *plausibilité* (une date au 32 du mois) reste au
+   contraire une bonne raison d'écarter le candidat ;
+3. certains motifs ont une **variante tolérante** (`motif_ocr`) là où la
+   confusion de caractères empêche le motif strict de correspondre : chiffres de
+   clé IBAN lus comme des lettres, extension de domaine rognée, caractère
+   parasite dans un domaine.
+
+Aucun des trois ne s'applique au texte propre. Ces tolérances font passer le
+rappel `critique` de bout en bout de 0,556 à 0,962 (spaCy) et 0,981
+(CamemBERT) ; le détail des défauts qu'elles corrigent est en §Résultats.
 
 ### M5 — Classification
 
@@ -347,11 +372,226 @@ fait passer le système au-dessus des cibles.
 
 **Rappel critique de 1,000 dans toutes les configurations comportant les
 règles.** Les validateurs structurels (mod-97, Luhn, formats nationaux) ne
-laissent passer aucun IBAN, numéro de carte ni numéro de pièce. C'est la
-propriété la plus importante du tableau : c'est sur elle que repose la
-promesse du système.
+laissent passer aucun IBAN, numéro de carte ni numéro de pièce — **sur du texte
+propre**. Cette réserve est essentielle : la campagne de bout en bout ci-dessous
+montre que la même propriété tombe à 0,556 sur un scan flou, et que ce sont
+précisément ces validateurs qui en sont la cause. Le tableau ci-dessus mesure la
+détection, pas la chaîne complète.
 
-Reproduire : `make eval` (spaCy) ; pour CamemBERT, depuis le conteneur —
+#### OCR — CER par condition de dégradation
+
+20 documents rendus puis dégradés, Tesseract `fra`, correspondance caractère à
+caractère contre la vérité terrain du corpus.
+
+| Condition | CER moyen | CER médian | CER p90 |
+|---|---|---|---|
+| référence | **0,066** | 0,036 | 0,259 |
+| flou (gaussien 5×5) | **0,060** | 0,036 | 0,229 |
+| rotation 3° | **0,041** | 0,011 | 0,210 |
+| JPEG q=40 | **0,048** | 0,022 | 0,198 |
+| bruit gaussien σ=18 | 0,150 | 0,128 | 0,283 |
+
+Quatre conditions sur cinq passent la cible de 0,10. **Le bruit gaussien reste
+au-dessus**, et c'est un résultat, pas un réglage à trouver : la médiane vaut
+0,128, donc la dégradation est uniforme et non tirée par quelques pages. La
+cause est l'ordre imposé du prétraitement — la binarisation précède le filtre
+médian, si bien que le grain est d'abord amplifié en points isolés, puis
+seulement lissé. Débruiter avant de binariser corrigerait ce cas, au prix
+d'une modification de la chaîne spécifiée en §M3.
+
+Deux enseignements méthodologiques sont venus de cette campagne, tous deux
+consignés dans le code :
+
+**Le rendu du corpus doit utiliser une vraie police TrueType.** Avec la police
+vectorielle d'OpenCV (`FONT_HERSHEY_SIMPLEX`), le point du « i » n'est pas
+tracé : Tesseract lit « DOMACILE », « soussgné », « Bneta Ndaye », et le CER
+mesuré passe de 0,025 à 0,133 sur la même page. La mesure décrivait alors le
+générateur d'images, pas la chaîne OCR.
+
+**Le redressement doit refuser d'agir quand sa mesure n'est pas fiable.** Sur
+une page bruitée, Hough détecte 70 à 110 « lignes » qui ne sont que du grain ;
+pivoter de leur angle médian arbitraire étalait le grain en amas lus comme du
+texte — 1135 caractères restitués pour 174 attendus, soit un CER de 5,9. Ce qui
+distingue une inclinaison réelle du bruit n'est pas le nombre de lignes mais
+leur accord : écart absolu médian de 0,06–0,13° pour une inclinaison de 3°,
+contre 1,10–1,84° pour du bruit. `ocr.py` exige désormais cet accord, et
+s'abstient sinon. Un redressement qui se trompe coûte bien plus cher qu'un
+redressement omis.
+
+#### Bout en bout : rappel par condition de dégradation
+
+C'est la mesure qui **compose** les deux précédentes, et la seule qui dise ce
+que le système protège réellement sur un document scanné. `make eval-e2e`.
+
+Elle ne se déduit pas des deux autres. L'appariement se fait **par valeur** et
+non par position : les offsets de la vérité terrain vivent dans le texte
+d'origine, ceux des prédictions dans le texte océrisé, et l'OCR insère et
+supprime des caractères. Tolérance de 25 % des caractères, avec la casse, les
+accents et la ponctuation neutralisés — mais **sans** replier les confusions
+propres à l'OCR (O/0, I/1, S/5), ce qui gonflerait le rappel en faisant passer
+pour trouvée une donnée que le système n'a pas su lire.
+
+Rappel par niveau de sensibilité, 60 documents par condition (support 366),
+fusion + **CamemBERT** — la configuration par défaut :
+
+| Niveau | référence | bruit | flou | rotation | jpeg40 |
+|---|---|---|---|---|---|
+| faible | 0,886 | 0,867 | 0,895 | 0,914 | 0,905 |
+| moyen | 0,847 | 0,810 | 0,883 | 0,942 | 0,920 |
+| eleve | 0,944 | 0,859 | 0,873 | 0,958 | 0,986 |
+| **critique** | **0,981** | **1,000** | **0,981** | **0,981** | **0,981** |
+
+| Indicateur | Mesuré | Cible | Statut |
+|---|---|---|---|
+| Rappel `critique`, pire condition | **0,981** | 0,95 | atteinte |
+| Rappel global, pire condition | 0,863 | 0,90 | non atteinte |
+| Rappel global, hors condition `bruit` | 0,896 – 0,943 | 0,90 | atteinte sur 3 conditions / 4 |
+| F2, pire condition | 0,832 | 0,90 | non atteinte |
+
+**Le rappel `critique` tient sur la condition la plus défavorable, pas en
+moyenne** : c'est la garantie qui engage le système, puisque c'est le niveau que
+le portail confronte au rôle. Le rappel global reste en dessous de la cible sur
+`bruit`, la condition où le CER atteint 0,428 — l'ordre imposé du prétraitement
+binarise avant de filtrer, ce qui amplifie le grain (voir §OCR).
+
+Le même protocole avec spaCy donne un rappel `critique` minimal de 0,962 et un
+rappel global de 0,738 – 0,779 : l'écart entre les deux backends se concentre sur
+les types que la NER porte seule, et **ne touche pas** le niveau `critique`, dont
+les types passent tous par une règle et un validateur.
+
+Le type restant nettement en retrait est `EMAIL` (0,615 – 0,846). Les autres
+sont à 0,80 ou au-delà, et les quatre types `critique` à 0,957 – 1,000.
+
+##### Ce qu'il a fallu corriger pour y arriver
+
+La première mesure donnait un rappel `critique` de **0,556**. Le protocole a
+donc d'abord servi à révéler cinq défauts, tous dans la détection et non dans
+l'OCR — la décomposition des pertes le disait sans ambiguïté : sur 41 entités
+perdues, 36 étaient encore lisibles dans le texte océrisé.
+
+**1. L'OCR remplace le point du domaine par un espace.** `binetandiaye@mail.bj`
+ressort en `binetandiaye @mall bJ`. Le point n'est pas déplacé, il a disparu :
+aucun recollage de ponctuation ne pouvait le retrouver.
+[`reparation_ocr.py`](ai-engine/app/detection/reparation_ocr.py) le restitue,
+mais seulement après un `@` et devant ce qui a la forme d'une extension de
+domaine — hors de ce contexte, transformer un espace en point fabriquerait des
+jetons de toutes pièces.
+
+**2. Un chiffre de la clé IBAN est lu comme une lettre.** `SN68…` ressort en
+`SNG8…`, `SNS8…`. Le motif exige `[A-Z]{2}\d{2}` et ne correspond alors **plus
+du tout** : il n'y avait même pas de candidat à soumettre au mod-97, et aucune
+tolérance sur le validateur ne pouvait rattraper cela. La correction est au
+niveau du motif (`MOTIF_IBAN_OCR`), pas du validateur.
+
+**3. Le score attribué aux candidats non validés était trop bas.** Fixé d'abord
+à 0,45, il faisait perdre l'IBAN à la fusion face au `LOCALITE`/`ORGANISATION`
+rendu par spaCy — dont le score de 0,85 est une **constante arbitraire** et non
+une probabilité. L'IBAN n'était pas seulement manqué : il était *remplacé*, donc
+reclassé de `critique` à `faible`. Un sous-classement, la faille même que M5
+interdit. Une chaîne de 28 caractères au format IBAN dans un document océrisé
+est bien plus probablement un IBAN qu'une étiquette NER générique : l'échec du
+mod-97 est *expliqué* par le bruit de lecture, il n'est pas un indice contre la
+nature de la donnée. Le score est donc à 0,90.
+
+**4. Un numéro national satisfait parfois le contrôle de Luhn par coïncidence.**
+`CARTE_BANCAIRE`, validé, l'emportait sur `NUM_PIECE_IDENTITE`. Les deux types
+étant `critique`, **la donnée restait protégée à l'identique et aucune fuite n'en
+résultait** — seule la métrique par type y voyait un manque. Une seule
+amélioration était fondée : quand le document **étiquette** le numéro
+(« N° CNI : »), ce contexte vaut plus qu'une coïncidence de format. Sans
+étiquette, l'ambiguïté est réelle et n'est pas tranchée artificiellement.
+
+**5. L'OCR abîme le domaine des adresses de plusieurs façons.** Extension rognée
+(`poste.ci` → `poste.c`), caractère parasite inséré (`poste` → `pos'e`), accolade
+en fin de ligne (`mail.bj` → `mail.b]`). Plutôt que d'énumérer indéfiniment les
+confusions rencontrées, le motif OCR admet tout caractère non blanc dans le
+domaine : la structure `@…point…extension` reste très sélective dans un
+document. Deux régressions ont été trouvées en écrivant les tests de ce
+correctif — la réparation ajoutait un point après une adresse *déjà complète*
+(`awa.diouf@exemple.sn pour` → `…sn.pour`, le masquage débordait sur le texte
+courant), et une mention `@twitter` devient une fausse adresse. La première est
+corrigée ; la seconde est assumée : masquer deux mots de trop coûte moins que
+laisser une adresse en clair.
+
+Les tolérances ne s'appliquent **qu'au texte issu de l'OCR** : la détection sur
+texte propre est inchangée, rappel critique 1,000. C'est un arbitrage local
+et assumé — sur un scan, mieux vaut masquer un faux IBAN que laisser passer un
+vrai, ce que le F2 accepte par construction. La précision de bout en bout a
+d'ailleurs **augmenté** à chaque étape (0,578 → 0,607 avec spaCy, 0,777 avec
+CamemBERT) : les entités récupérées sont de vrais positifs, et non du bruit
+gagné contre de la précision.
+
+##### Une leçon de méthode
+
+Le premier chiffre publiable était 0,944, à une entité près de la cible sur un
+échantillon de 18. Plutôt que d'ajuster des scores pour franchir le seuil,
+l'échantillon a été porté à 366 entités par condition : la mesure s'est stabilisée
+à 0,962. Un seuil manqué de 0,006 sur 18 observations ne se corrige pas dans le
+code, il se mesure mieux.
+
+#### Matrices de confusion
+
+`make eval` produit, pour chaque configuration, deux matrices en plus des
+scores : `confusion_<config>_types.csv` et `confusion_<config>_niveaux.csv`,
+avec le relevé des sous-classements.
+
+Elles reposent sur un appariement **agnostique au type** : deux empans au même
+endroit sont appariés même si leurs étiquettes diffèrent. C'est indispensable,
+car précision et rappel confondent deux erreurs de nature très différente —
+une donnée **manquée** (elle sort en clair : fuite) et une donnée **trouvée
+mais mal étiquetée** (elle est protégée, au mauvais niveau). La colonne
+`(manquée)` et la ligne `(superflue)` portent les marges.
+
+Confusion par niveau, fusion + CamemBERT, partition `test` :
+
+| attendu \ prédit | critique | eleve | faible | moyen | (manquée) | total |
+|---|---|---|---|---|---|---|
+| **critique** | **26** | 0 | 0 | 0 | 0 | 26 |
+| **eleve** | 0 | **33** | 0 | 0 | 0 | 33 |
+| **faible** | 0 | 1 | **49** | 0 | 2 | 52 |
+| **moyen** | 0 | 19 | 0 | **47** | 0 | 66 |
+| (superflue) | 0 | 27 | 4 | 8 | — | 39 |
+
+Trois lectures :
+
+**Zéro sous-classement** — la moitié sous la diagonale est vide. Aucune donnée
+n'a été classée à un niveau inférieur au sien, donc aucune n'est devenue
+lisible par un rôle qui n'y a pas droit. C'est le critère d'acceptation de M5,
+et c'est la seule moitié de la matrice qui constitue une faille : le
+sur-classement ne fait que masquer trop.
+
+**Les 19 `moyen -> eleve` ne sont pas des erreurs** — c'est l'ajustement
+contextuel de M5 qui fonctionne. Un `NOM_PERSONNE` entouré d'une date de
+naissance et d'un numéro de pièce passe volontairement de `moyen` à `eleve`. Le
+corpus annote le type, pas cet ajustement : d'où la précision de 0,516 sur le
+niveau `eleve` dans le tableau par type, qui se lirait à tort comme un défaut.
+
+**Le niveau `critique` est exact à 26/26** — sans confusion ni omission, parce
+que ces types passent tous par un validateur structurel (mod-97, Luhn, formats
+nationaux). C'est ce que la matrice permet d'affirmer, là où un rappel de 1,000
+laissait encore ouverte la question de l'étiquetage.
+
+##### La confusion a une conséquence de sécurité, pas seulement de rappel
+
+Le même tableau produit avec spaCy révèle **3 sous-classements** là où
+CamemBERT n'en produit aucun :
+
+| Confusion de type | Effet sur le niveau |
+|---|---|
+| `PLAQUE_IMMAT` → `ORGANISATION` (×1) | eleve → faible |
+| `NOM_PERSONNE` → `LOCALITE` (×1) | moyen → faible |
+| `NOM_PERSONNE` → `ORGANISATION` (×1) | moyen → faible |
+
+La faiblesse de spaCy sur les noms propres ouest-africains ne coûte donc pas
+seulement du rappel : elle **déclasse** la donnée, et un rôle `support_n1` peut
+lire en clair une plaque d'immatriculation ou un patronyme. C'est un argument
+de sécurité en faveur de l'ADR n°4, qui s'ajoute à l'argument de rappel — et il
+n'apparaît que dans la matrice de confusion, pas dans les scores agrégés.
+
+Le niveau `critique` reste exact avec les deux backends : les types critiques
+ne dépendent pas de la NER.
+
+Reproduire : `make eval` (spaCy) et `make eval-ocr` ; pour CamemBERT, depuis le conteneur —
 `docker compose exec -e NER_BACKEND=camembert moteur-ia python -m
 evaluation.run_detection_eval --annotations /tmp/annotations.jsonl`.
 

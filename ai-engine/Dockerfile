@@ -2,12 +2,17 @@ FROM python:3.11-slim
 
 # Tesseract + pack français (OCR_LANG=fra) et les bibliothèques natives
 # attendues par OpenCV headless.
+#
+# `fonts-dejavu-core` sert au rendu du corpus dégradé : sans vraie police
+# TrueType, `corpus/degrade.py` retombe sur la police vectorielle d'OpenCV, qui
+# perd le point du « i » et multiplie par cinq le CER mesuré.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       tesseract-ocr \
       tesseract-ocr-fra \
       libglib2.0-0 \
       libgl1 \
       curl \
+      fonts-dejavu-core \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv

@@ -17,10 +17,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+logger = logging.getLogger(__name__)
 
 CONDITIONS = ("reference", "bruit", "flou", "rotation", "jpeg40")
 
@@ -28,28 +32,69 @@ LARGEUR = 1240   # A4 à 150 ppp
 HAUTEUR = 1754
 MARGE = 70
 INTERLIGNE = 26
+CORPS = 20
+ENCRE = (15, 15, 15)
+
+# Le rendu doit utiliser une vraie police TrueType, et non la police vectorielle
+# `FONT_HERSHEY_SIMPLEX` d'OpenCV. Celle-ci trace des segments et perd le point
+# du « i » : Tesseract lit « DOMACILE », « soussgné », « Bneta Ndaye ». Le CER
+# mesuré était alors cinq fois trop élevé (0,133 contre 0,025 sur la même page)
+# et décrivait le générateur d'images, pas la chaîne OCR — exactement le genre
+# de mesure qui fait conclure à tort que le prétraitement est insuffisant.
+POLICES_CANDIDATES = (
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",                  # Debian (image Docker)
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
+    "/System/Library/Fonts/Supplemental/Arial.ttf",                     # macOS
+    "/Library/Fonts/Arial Unicode.ttf",
+    "C:\\Windows\\Fonts\\arial.ttf",                                  # Windows
+)
 
 
-def rendre(texte: str) -> np.ndarray:
+def charger_police(taille: int = CORPS) -> ImageFont.FreeTypeFont | None:
+    """Première police TrueType disponible, ou None si aucune n'est installée."""
+    for chemin in POLICES_CANDIDATES:
+        if Path(chemin).exists():
+            try:
+                return ImageFont.truetype(chemin, taille)
+            except OSError:
+                continue
+    return None
+
+
+def rendre(texte: str, police: ImageFont.FreeTypeFont | None = None) -> np.ndarray:
     """Rend le texte en image, à la façon d'un document imprimé puis scanné."""
-    image = np.full((HAUTEUR, LARGEUR, 3), 255, dtype=np.uint8)
-    y = MARGE
+    lignes = texte.split("\n")
 
-    for ligne in texte.split("\n"):
+    if police is None:
+        logger.warning(
+            "Aucune police TrueType trouvée : repli sur la police vectorielle "
+            "d'OpenCV. Le CER mesuré ne sera PAS représentatif de la chaîne "
+            "OCR — installer fonts-dejavu-core (Debian) avant de publier des "
+            "résultats."
+        )
+        image = np.full((HAUTEUR, LARGEUR, 3), 255, dtype=np.uint8)
+        y = MARGE
+        for ligne in lignes:
+            if y > HAUTEUR - MARGE:
+                break
+            cv2.putText(
+                image, ligne[:110], (MARGE, y), cv2.FONT_HERSHEY_SIMPLEX,
+                0.55, ENCRE, 1, cv2.LINE_AA,
+            )
+            y += INTERLIGNE
+        return image
+
+    page = Image.new("RGB", (LARGEUR, HAUTEUR), "white")
+    dessin = ImageDraw.Draw(page)
+    y = MARGE
+    for ligne in lignes:
         if y > HAUTEUR - MARGE:
             break
-        cv2.putText(
-            image,
-            ligne[:110],
-            (MARGE, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.55,
-            (15, 15, 15),
-            1,
-            cv2.LINE_AA,
-        )
+        dessin.text((MARGE, y), ligne[:110], font=police, fill=ENCRE)
         y += INTERLIGNE
-    return image
+
+    return cv2.cvtColor(np.array(page), cv2.COLOR_RGB2BGR)
 
 
 def appliquer(image: np.ndarray, condition: str, alea: np.random.Generator) -> np.ndarray:
@@ -87,6 +132,7 @@ def degrader(entree: Path, sortie: Path, limite: int | None, graine: int) -> Non
         )
 
     alea = np.random.default_rng(graine)
+    police = charger_police()
     sortie.mkdir(parents=True, exist_ok=True)
     index: list[dict[str, object]] = []
 
@@ -97,7 +143,7 @@ def degrader(entree: Path, sortie: Path, limite: int | None, graine: int) -> Non
         documents = documents[:limite]
 
     for document in documents:
-        image = rendre(document["texte"])
+        image = rendre(document["texte"], police)
         for condition in CONDITIONS:
             repertoire = sortie / condition
             repertoire.mkdir(parents=True, exist_ok=True)
@@ -129,6 +175,7 @@ def degrader(entree: Path, sortie: Path, limite: int | None, graine: int) -> Non
 
 
 def principal() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     analyseur = argparse.ArgumentParser(description="Dégradations contrôlées du corpus")
     analyseur.add_argument("--entree", type=Path, default=Path("corpus/data/synthetic"))
     analyseur.add_argument("--sortie", type=Path, default=Path("corpus/data/scans"))

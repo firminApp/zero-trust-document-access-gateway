@@ -28,6 +28,25 @@ logger = logging.getLogger(__name__)
 
 FENETRE_BINARISATION = 31
 
+# Redressement : conditions de confiance.
+#
+# Sur une image bruitée, Hough détecte 70 à 110 « lignes » qui ne sont que du
+# grain, et leur angle médian est arbitraire. Faire pivoter la page de ce petit
+# angle arbitraire, en interpolation cubique, étale le grain en amas que
+# Tesseract lit comme du texte : mesuré à 1135 caractères restitués pour 174
+# attendus, soit un CER de 5,9. Un redressement qui se trompe est bien plus
+# coûteux qu'un redressement omis.
+#
+# Ce qui distingue une vraie inclinaison du bruit, ce n'est pas le nombre de
+# lignes mais leur ACCORD. Mesuré sur le corpus dégradé :
+#   inclinaison réelle de 3°  -> écart absolu médian 0,06 à 0,13°
+#   bruit gaussien (sigma=18) -> écart absolu médian 1,10 à 1,84°
+# Le seuil ci-dessous est placé dans cet intervalle, largement à distance des
+# deux régimes.
+DISPERSION_MAX_DEGRES = 0.5
+MIN_LIGNES_REDRESSEMENT = 8
+ANGLE_MIN_DEGRES = 0.15
+
 
 def version_tesseract() -> str:
     try:
@@ -118,11 +137,25 @@ def _redresser(binaire: np.ndarray) -> np.ndarray:
         if -20 < angle < 20:
             angles.append(float(angle))
 
-    if not angles:
+    if len(angles) < MIN_LIGNES_REDRESSEMENT:
         return binaire
 
-    angle_dominant = float(np.median(angles))
-    if abs(angle_dominant) < 0.15:
+    tableau = np.asarray(angles)
+    angle_dominant = float(np.median(tableau))
+    dispersion = float(np.median(np.abs(tableau - angle_dominant)))
+
+    if dispersion > DISPERSION_MAX_DEGRES:
+        # Les lignes ne s'accordent pas : la mesure ne veut rien dire. On
+        # préfère une page non redressée à une page abîmée.
+        logger.debug(
+            "Redressement écarté : %d lignes, dispersion %.2f° (> %.2f°)",
+            len(angles),
+            dispersion,
+            DISPERSION_MAX_DEGRES,
+        )
+        return binaire
+
+    if abs(angle_dominant) < ANGLE_MIN_DEGRES:
         return binaire
 
     hauteur, largeur = binaire.shape[:2]

@@ -1,0 +1,12 @@
+**/node_modules
+**/dist
+**/.venv
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.ruff_cache
+**/coverage
+.git
+.env
+corpus/data
+ai-engine/evaluation/resultats

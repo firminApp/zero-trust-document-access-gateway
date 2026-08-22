@@ -1,0 +1,13 @@
+# Backend NER CamemBERT (ADR n°4). Séparé du socle parce que torch pèse
+# plusieurs centaines de Mo : `NER_BACKEND=spacy` doit rester utilisable sans.
+# Installation CPU : pip install -r requirements-camembert.txt \
+#   --extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.5.1
+transformers==4.47.1
+
+# Indispensables au tokenizer CamemBERT : le modèle est publié avec un
+# tokenizer SentencePiece, que `transformers` convertit au format rapide en
+# passant par protobuf. Sans ces deux paquets, `AutoTokenizer.from_pretrained`
+# échoue au chargement et le moteur retombe silencieusement sur « aucun ».
+sentencepiece==0.2.0
+protobuf==5.29.2

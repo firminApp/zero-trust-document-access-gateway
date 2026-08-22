@@ -1,0 +1,188 @@
+# =============================================================================
+# Zero-Trust Document Access Gateway
+#
+# Invariant d'architecture rendu exécutable ici : `moteur-ia` ne publie AUCUN
+# port. Il n'est joignable que depuis le réseau interne, donc uniquement par la
+# passerelle et l'orchestrateur. Aucun client ne peut le solliciter directement
+# pour contourner le contrôle d'accès.
+#
+# Second invariant : seuls `passerelle` et `orchestrateur` reçoivent les
+# identifiants de stockage (S3_*, GDRIVE_*). Le moteur IA reçoit des octets.
+# =============================================================================
+
+name: zero-trust-gateway
+
+services:
+  base:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ztg
+      POSTGRES_PASSWORD: ztg
+      POSTGRES_DB: ztg
+    ports:
+      - '5432:5432'
+    volumes:
+      - donnees-base:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ztg -d ztg']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [interne]
+
+  file:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    ports:
+      - '6379:6379'
+    volumes:
+      - donnees-file:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [interne]
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    ports:
+      - '9000:9000'
+      - '9001:9001'
+    volumes:
+      - donnees-minio:/data
+    healthcheck:
+      test: ['CMD', 'mc', 'ready', 'local']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [interne]
+
+  # Prépare le bucket de démonstration et y dépose le corpus, puis s'arrête.
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-documents}
+    volumes:
+      - ./corpus/data:/corpus:ro
+    entrypoint: >
+      /bin/sh -c "
+      mc alias set local http://minio:9000 $$S3_ACCESS_KEY $$S3_SECRET_KEY &&
+      mc mb --ignore-existing local/$$S3_BUCKET &&
+      (mc mirror --overwrite --remove /corpus/synthetic/ local/$$S3_BUCKET/synthetic/ || true) &&
+      echo 'bucket de démonstration prêt'
+      "
+    networks: [interne]
+
+  moteur-ia:
+    build:
+      context: ./ai-engine
+      args:
+        AVEC_CAMEMBERT: ${AVEC_CAMEMBERT:-true}
+    environment:
+      NER_BACKEND: ${NER_BACKEND:-camembert}
+      NER_THRESHOLD: ${NER_THRESHOLD:-0.50}
+      OCR_LANG: ${OCR_LANG:-fra}
+      HASH_SALT: ${HASH_SALT:-change-me}
+      AES_KEY: ${AES_KEY:-}
+    # AUCUN port publié : c'est l'invariant §2 rendu exécutable.
+    expose:
+      - '8000'
+    volumes:
+      # Cache des modèles : évite un nouveau téléchargement à chaque démarrage.
+      - modeles-hf:/root/.cache/huggingface
+    networks: [interne]
+
+  passerelle:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    depends_on:
+      base:
+        condition: service_healthy
+      file:
+        condition: service_healthy
+    environment:
+      PORT: 3000
+      POSTGRES_URL: postgresql://ztg:ztg@base:5432/ztg
+      REDIS_URL: redis://file:6379
+      AI_ENGINE_URL: http://moteur-ia:8000
+      JWT_SECRET: ${JWT_SECRET:-change-me}
+      HASH_SALT: ${HASH_SALT:-change-me}
+      AES_KEY: ${AES_KEY:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-documents}
+      GDRIVE_SERVICE_ACCOUNT_JSON: ${GDRIVE_SERVICE_ACCOUNT_JSON:-}
+      LOCAL_ROOT: /data/local
+    ports:
+      - '3000:3000'
+    volumes:
+      # Source « disque local » de la démonstration, montée en lecture seule :
+      # le portail lit le patrimoine, il ne le modifie pas.
+      - ./corpus/data/synthetic:/data/local:ro
+    networks: [interne]
+
+  orchestrateur:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    command: ['node', 'dist/orchestrateur.js']
+    depends_on:
+      base:
+        condition: service_healthy
+      file:
+        condition: service_healthy
+    environment:
+      POSTGRES_URL: postgresql://ztg:ztg@base:5432/ztg
+      REDIS_URL: redis://file:6379
+      AI_ENGINE_URL: http://moteur-ia:8000
+      HASH_SALT: ${HASH_SALT:-change-me}
+      AES_KEY: ${AES_KEY:-}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-documents}
+      GDRIVE_SERVICE_ACCOUNT_JSON: ${GDRIVE_SERVICE_ACCOUNT_JSON:-}
+      LOCAL_ROOT: /data/local
+      WORKER_CONCURRENCE: ${WORKER_CONCURRENCE:-4}
+    # Aucun port : l'orchestrateur ne sert aucune requête.
+    #
+    # La sonde HTTP héritée de l'image est donc désactivée : elle interroge
+    # localhost:3000, que ce processus n'écoute pas, et marquerait le service
+    # « unhealthy » en permanence. Une sonde qui échoue toujours ne surveille
+    # plus rien — elle apprend seulement à l'exploitant à ignorer l'alerte.
+    healthcheck:
+      disable: true
+    volumes:
+      - ./corpus/data/synthetic:/data/local:ro
+    networks: [interne]
+
+  tableau-de-bord:
+    build:
+      context: ./dashboard
+    depends_on:
+      - passerelle
+    ports:
+      - '5173:5173'
+    networks: [interne]
+
+networks:
+  interne:
+    driver: bridge
+
+volumes:
+  donnees-base:
+  donnees-file:
+  donnees-minio:
+  modeles-hf:

@@ -1,0 +1,34 @@
+[project]
+name = "ztg-ai-engine"
+version = "1.0.0"
+description = "Moteur IA du Zero-Trust Document Access Gateway"
+requires-python = ">=3.11"
+
+[tool.black]
+line-length = 95
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 95
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ANN", "SIM"]
+ignore = [
+  "ANN401",  # Any toléré aux frontières des bibliothèques tierces
+  "B008",    # Depends() en valeur par défaut : idiome FastAPI
+  "E501",    # longueur gérée par black
+  # `class X(str, Enum)` est l'idiome Pydantic : il sérialise en chaîne dans
+  # les schémas d'API. `StrEnum` changerait la valeur de `str(X.membre)`, donc
+  # la forme des réponses JSON — un changement de contrat, pas de style.
+  "UP042",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN"]
+"evaluation/*" = ["ANN"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]

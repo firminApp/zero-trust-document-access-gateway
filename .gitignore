@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+.env
+coverage/
+.pytest_cache/
+.ruff_cache/
+*.tsbuildinfo
+
+# Corpus généré et résultats d'évaluation : reproductibles par `make corpus`
+# et `make eval`, donc hors dépôt.
+corpus/data/synthetic/
+corpus/data/scans/
+corpus/data/annotations.jsonl
+ai-engine/evaluation/resultats/

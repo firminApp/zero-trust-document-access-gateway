@@ -1,0 +1,7 @@
+# Référence externe de comparaison dans l'évaluation (chapitre III).
+# Jamais requise au runtime : `presidio_adapter` importe la bibliothèque
+# localement, et `NER_BACKEND=presidio` retombe proprement sur « aucun » si
+# elle est absente. Séparée du socle de développement parce que ses
+# dépendances entrent régulièrement en conflit avec la version de spaCy
+# épinglée par le projet.
+presidio-analyzer==2.2.357
